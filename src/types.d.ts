@@ -59,6 +59,7 @@ export interface ApiResponse {
   errors: string[];
   messages: string[];
   result: Deployment[];
+  result_info?: { page: number; per_page: number; total_pages: number; total_count: number };
 }
 
 export interface AuthHeaders {

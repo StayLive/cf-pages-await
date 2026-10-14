@@ -23587,6 +23587,7 @@ function getOctokit(token, options, ...additionalPlugins) {
 }
 
 // src/action.ts
+var MAX_PAGES = 20;
 var waiting = true;
 var ghDeployment;
 var markedAsInProgress = false;
@@ -23651,32 +23652,37 @@ function validateAuthInputs(token, email, key) {
   return false;
 }
 async function pollApi(authHeaders, accountId, project, commitHash) {
-  let res;
-  let body;
-  try {
-    res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${project}/deployments?sort_by=created_on&sort_order=desc`, {
-      headers: { ...authHeaders }
-    });
-  } catch (e) {
-    error(`Failed to send request to CF API - network issue? ${e.message}`);
-    setFailed(e);
-    return;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    let res;
+    let body;
+    try {
+      res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${project}/deployments?sort_by=created_on&sort_order=desc&page=${page}`, {
+        headers: { ...authHeaders }
+      });
+    } catch (e) {
+      error(`Failed to send request to CF API - network issue? ${e.message}`);
+      setFailed(e);
+      return;
+    }
+    try {
+      body = await res.json();
+    } catch (e) {
+      error(`CF API did not return a JSON (possibly down?) - Status code: ${res.status} (${res.statusText})`);
+      setFailed(e);
+      return;
+    }
+    if (!body.success) {
+      waiting = false;
+      const error2 = body.errors.length > 0 ? body.errors[0] : "Unknown error!";
+      setFailed(`Failed to check deployment status! Error: ${JSON.stringify(error2)}`);
+      return;
+    }
+    if (!commitHash) return body.result?.[0];
+    const match = body.result?.find?.((deployment) => deployment.deployment_trigger?.metadata?.commit_hash === commitHash);
+    if (match) return match;
+    const totalPages = body.result_info?.total_pages;
+    if (!body.result?.length || totalPages !== void 0 && page >= totalPages) return;
   }
-  try {
-    body = await res.json();
-  } catch (e) {
-    error(`CF API did not return a JSON (possibly down?) - Status code: ${res.status} (${res.statusText})`);
-    setFailed(e);
-    return;
-  }
-  if (!body.success) {
-    waiting = false;
-    const error2 = body.errors.length > 0 ? body.errors[0] : "Unknown error!";
-    setFailed(`Failed to check deployment status! Error: ${JSON.stringify(error2)}`);
-    return;
-  }
-  if (!commitHash) return body.result?.[0];
-  return body.result?.find?.((deployment) => deployment.deployment_trigger?.metadata?.commit_hash === commitHash);
 }
 async function sleep() {
   return new Promise((resolve) => setTimeout(resolve, 5e3));

@@ -4,6 +4,8 @@ import * as github from '@actions/github';
 import { context } from '@actions/github/lib/utils';
 import { ApiResponse, AuthHeaders, Deployment } from './types';
 
+const MAX_PAGES = 20;
+
 let waiting = true;
 // @ts-ignore - Typing GitHub's responses is a pain in the ass
 let ghDeployment;
@@ -92,43 +94,49 @@ function validateAuthInputs(token: string, email: string, key: string) {
 }
 
 async function pollApi(authHeaders: AuthHeaders, accountId: string, project: string, commitHash: string): Promise<Deployment|undefined> {
-  // curl -X GET "https://api.cloudflare.com/client/v4/accounts/:account_id/pages/projects/:project_name/deployments" \
-  //   -H "X-Auth-Email: user@example.com" \
-  //   -H "X-Auth-Key: c2547eb745079dac9320b638f5e225cf483cc5cfdda41"
-  let res: Response;
-  let body: ApiResponse;
-  // Try and fetch, may fail due to a network issue
-  try {
-    res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${project}/deployments?sort_by=created_on&sort_order=desc`, {
-      headers: { ...authHeaders },
-    });
-  } catch(e) {
-    // @ts-ignore
-    core.error(`Failed to send request to CF API - network issue? ${e.message}`);
-    // @ts-ignore
-    core.setFailed(e);
-    return;
-  }
+  // curl -X GET "https://api.cloudflare.com/client/v4/accounts/:account_id/pages/projects/:project_name/deployments"   //   -H "X-Auth-Email: user@example.com"   //   -H "X-Auth-Key: c2547eb745079dac9320b638f5e225cf483cc5cfdda41"
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    let res: Response;
+    let body: ApiResponse;
+    // Try and fetch, may fail due to a network issue
+    try {
+      res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${project}/deployments?sort_by=created_on&sort_order=desc&page=${page}`, {
+        headers: { ...authHeaders },
+      });
+    } catch(e) {
+      // @ts-ignore
+      core.error(`Failed to send request to CF API - network issue? ${e.message}`);
+      // @ts-ignore
+      core.setFailed(e);
+      return;
+    }
 
-  // If the body isn't a JSON then fail - CF seems to do this sometimes?
-  try {
-    body = await res.json() as ApiResponse;
-  } catch(e) {
-    core.error(`CF API did not return a JSON (possibly down?) - Status code: ${res.status} (${res.statusText})`);
-    // @ts-ignore
-    core.setFailed(e);
-    return;
-  }
+    // If the body isn't a JSON then fail - CF seems to do this sometimes?
+    try {
+      body = await res.json() as ApiResponse;
+    } catch(e) {
+      core.error(`CF API did not return a JSON (possibly down?) - Status code: ${res.status} (${res.statusText})`);
+      // @ts-ignore
+      core.setFailed(e);
+      return;
+    }
 
-  if (!body.success) {
-    waiting = false;
-    const error = body.errors.length > 0 ? body.errors[0] : 'Unknown error!';
-    core.setFailed(`Failed to check deployment status! Error: ${JSON.stringify(error)}`);
-    return;
-  }
+    if (!body.success) {
+      waiting = false;
+      const error = body.errors.length > 0 ? body.errors[0] : 'Unknown error!';
+      core.setFailed(`Failed to check deployment status! Error: ${JSON.stringify(error)}`);
+      return;
+    }
 
-  if (!commitHash) return body.result?.[0];
-  return body.result?.find?.(deployment => deployment.deployment_trigger?.metadata?.commit_hash === commitHash);
+    if (!commitHash) return body.result?.[0];
+
+    const match = body.result?.find?.(deployment => deployment.deployment_trigger?.metadata?.commit_hash === commitHash);
+    if (match) return match;
+
+    // A commit older than the first page of deployments is still deployed, so keep paging
+    const totalPages = body.result_info?.total_pages;
+    if (!body.result?.length || (totalPages !== undefined && page >= totalPages)) return;
+  }
 }
 
 async function sleep() {
